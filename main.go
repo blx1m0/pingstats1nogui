@@ -33,7 +33,17 @@ func pingHost(host string, wg *sync.WaitGroup, results chan<- string) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		results <- fmt.Sprintf("Ошибка при пинге %s: %v", host, err)
+		// Создаем статистику с ошибкой
+		stats := &PingStats{
+			Host:       host,
+			MinRTT:     0,
+			MaxRTT:     0,
+			AvgRTT:     0,
+			PacketLoss: 100, // 100% потерь при ошибке
+			LastUpdate: time.Now(),
+		}
+		updateStatsMap(host, stats)
+		results <- fmt.Sprintf("Ошибка при пинге %s: %v\n%s", host, err, output)
 		return
 	}
 
@@ -50,6 +60,12 @@ func pingHost(host string, wg *sync.WaitGroup, results chan<- string) {
 
 	// Парсим статистику
 	stats := parsePingStats(string(output), host)
+	if stats.PacketLoss == 100 {
+		// Если все пакеты потеряны, устанавливаем время в 0
+		stats.MinRTT = 0
+		stats.MaxRTT = 0
+		stats.AvgRTT = 0
+	}
 	updateStatsMap(host, stats)
 
 	results <- fmt.Sprintf("Результаты пинга для %s:\n%s", host, output)
@@ -60,21 +76,30 @@ func parsePingStats(output, host string) *PingStats {
 	stats := &PingStats{
 		Host:       host,
 		LastUpdate: time.Now(),
+		PacketLoss: 100, // По умолчанию считаем, что все пакеты потеряны
 	}
 
 	// Регулярные выражения для извлечения статистики
 	minRTTRe := regexp.MustCompile(`min/avg/max.*?=.*?(\d+\.?\d*)/(\d+\.?\d*)/(\d+\.?\d*)`)
 	lossRe := regexp.MustCompile(`(\d+)% packet loss`)
+	transmittedRe := regexp.MustCompile(`(\d+) packets transmitted, (\d+) received`)
+
+	// Ищем информацию о переданных и полученных пакетах
+	if matches := transmittedRe.FindStringSubmatch(output); len(matches) > 2 {
+		transmitted, _ := strconv.Atoi(matches[1])
+		received, _ := strconv.Atoi(matches[2])
+		if transmitted > 0 {
+			stats.PacketLoss = float64(transmitted-received) * 100 / float64(transmitted)
+		}
+	}
 
 	// Ищем минимальное, среднее и максимальное время
 	if matches := minRTTRe.FindStringSubmatch(output); len(matches) > 3 {
 		stats.MinRTT, _ = strconv.ParseFloat(matches[1], 64)
 		stats.AvgRTT, _ = strconv.ParseFloat(matches[2], 64)
 		stats.MaxRTT, _ = strconv.ParseFloat(matches[3], 64)
-	}
-
-	// Ищем процент потери пакетов
-	if matches := lossRe.FindStringSubmatch(output); len(matches) > 1 {
+	} else if matches := lossRe.FindStringSubmatch(output); len(matches) > 1 {
+		// Если не нашли RTT, но нашли потери пакетов
 		stats.PacketLoss, _ = strconv.ParseFloat(matches[1], 64)
 	}
 
@@ -86,6 +111,11 @@ func updateStatsMap(host string, stats *PingStats) {
 	statsMutex.Lock()
 	defer statsMutex.Unlock()
 	statsMap[host] = stats
+
+	// Обновляем статистику в файле
+	if err := updatePingStats(host, stats); err != nil {
+		log.Printf("Ошибка при обновлении файла статистики: %v", err)
+	}
 }
 
 // Функция для трассировки маршрута до хоста
@@ -105,8 +135,20 @@ func traceRoute(host string) (string, error) {
 }
 
 // Функция для извлечения первых 3 хопов из вывода traceroute
-func getFirstThreeHops(traceOutput string) []string {
-	lines := strings.Split(traceOutput, "\n")
+func getFirstThreeHops(host string) ([]string, error) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("tracert", "-h", "3", host)
+	} else {
+		cmd = exec.Command("traceroute", "-m", "3", host)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при трассировке: %v", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
 	hops := []string{}
 	// Регулярное выражение для извлечения IP-адресов из скобок
 	re := regexp.MustCompile(`\((\d+\.\d+\.\d+\.\d+)\)`)
@@ -120,7 +162,12 @@ func getFirstThreeHops(traceOutput string) []string {
 			hops = append(hops, matches[1]) // Добавляем IP хопа
 		}
 	}
-	return hops
+
+	if len(hops) == 0 {
+		return nil, fmt.Errorf("не удалось получить хопы")
+	}
+
+	return hops, nil
 }
 
 // Функция для получения IP-адреса устройства в Linux и Windows
@@ -209,27 +256,128 @@ func runMTR(host string, maxHops int) error {
 }
 
 func startPingCollection(hosts []string) {
+	if len(hosts) == 0 {
+		log.Println("Не указаны хосты для пинга")
+		return
+	}
+
 	// Канал для сбора результатов пинга
 	results := make(chan string, len(hosts))
 	var wg sync.WaitGroup
 
 	// Пинг каждого хоста параллельно
 	for _, host := range hosts {
+		if host == "" {
+			continue
+		}
 		wg.Add(1)
 		go pingHost(host, &wg, results)
 	}
 
-	// Ждем завершения всех горутин
-	wg.Wait()
-	close(results)
+	// Запускаем горутину для закрытия канала после завершения всех пингов
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-	// Выводим все результаты пинга в лог
+	// Читаем результаты из канала
 	for result := range results {
 		log.Println(result)
 	}
 
 	log.Println("------------")
 	log.Println("Завершено выполнение программы.")
+}
+
+// Функция для сбора информации о сети
+func collectNetworkInfo() ([]string, error) {
+	var hosts []string
+
+	// Получаем IP устройства
+	deviceIP, err := getDeviceIP()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении IP устройства: %v", err)
+	}
+	hosts = append(hosts, deviceIP)
+	log.Printf("IP адрес устройства: %s", deviceIP)
+
+	// Получаем шлюз по умолчанию
+	gateway, err := getDefaultGateway()
+	if err != nil {
+		log.Printf("Предупреждение: не удалось получить шлюз по умолчанию: %v", err)
+	} else {
+		hosts = append(hosts, gateway)
+		log.Printf("Шлюз по умолчанию: %s", gateway)
+	}
+
+	// Получаем первые 3 хопа до 8.8.8.8
+	hops, err := getFirstThreeHops("8.8.8.8")
+	if err != nil {
+		log.Printf("Предупреждение: не удалось получить хопы до 8.8.8.8: %v", err)
+	} else {
+		hosts = append(hosts, hops...)
+		log.Printf("Первые 3 хопа до 8.8.8.8: %v", hops)
+	}
+
+	// Добавляем стандартные DNS-серверы
+	hosts = append(hosts, "8.8.8.8", "1.1.1.1", "77.88.8.8")
+
+	return hosts, nil
+}
+
+// Функция для получения шлюза по умолчанию
+func getDefaultGateway() (string, error) {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("ipconfig")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", err
+		}
+
+		// Конвертируем вывод в UTF-8 для Windows
+		decoder := charmap.Windows1251.NewDecoder()
+		reader := transform.NewReader(bytes.NewReader(output), decoder)
+		output, err = io.ReadAll(reader)
+		if err != nil {
+			return "", err
+		}
+
+		// Ищем строку с Default Gateway
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "Default Gateway") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					gateway := strings.TrimSpace(parts[1])
+					if gateway != "" && gateway != "0.0.0.0" {
+						return gateway, nil
+					}
+				}
+			}
+		}
+	} else {
+		cmd := exec.Command("ip", "route", "show", "default")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", err
+		}
+
+		// Ищем IP-адрес после "via"
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "via") {
+				parts := strings.Split(line, "via")
+				if len(parts) > 1 {
+					gateway := strings.Fields(parts[1])[0]
+					if gateway != "" && gateway != "0.0.0.0" {
+						return gateway, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("шлюз по умолчанию не найден")
 }
 
 func main() {
@@ -245,17 +393,16 @@ func main() {
 		log.Fatal("Утилита ping не найдена в системе")
 	}
 
-	// Создание папки для логов с учетом ОС
-	logDir := "stats_and_graphs"
-	if runtime.GOOS == "windows" {
-		logDir = filepath.Join(".", logDir)
-	}
-	err := os.MkdirAll(logDir, os.ModePerm)
-	if err != nil {
+	// Создание папки для логов
+	if err := ensureLogDir(); err != nil {
 		log.Fatalf("Ошибка при создании папки для логов: %v", err)
 	}
 
 	// Открываем лог-файл с учетом ОС
+	logDir := "stats_and_graphs"
+	if runtime.GOOS == "windows" {
+		logDir = filepath.Join(".", logDir)
+	}
 	logPath := filepath.Join(logDir, "ping_statistics.log")
 	logFile, err := os.OpenFile(logPath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
@@ -269,97 +416,12 @@ func main() {
 	log.Println("Лог сохранён в stats_and_graphs/ping_statistics.log")
 	log.Println("Made by Lg$")
 
-	// Получаем IP-адрес устройства
-	deviceIP, err := getDeviceIP()
+	// Собираем информацию о сети
+	networkHosts, err := collectNetworkInfo()
 	if err != nil {
-		log.Fatalf("Ошибка при получении IP-адреса устройства: %v", err)
-	}
-	log.Printf("IP адрес устройства: %s\n", deviceIP)
-
-	// Получаем первые 3 хопа до 8.8.8.8
-	traceResult, err := traceRoute("8.8.8.8")
-	if err != nil {
-		log.Fatalf("Ошибка при трассировке до 8.8.8.8: %v", err)
+		log.Printf("Предупреждение: %v", err)
 	}
 
-	// Извлекаем первые 3 хопа
-	hops := getFirstThreeHops(traceResult)
-	log.Printf("Трассировка до 8.8.8.8 (первые 3 хопа):\n")
-	for i, hop := range hops {
-		log.Printf("  %d. %s\n", i+1, hop)
-	}
-
-	// Формируем список хостов для пинга
-	hosts := []string{
-		deviceIP,    // IP устройства
-		"127.0.0.1", // Локальный адрес
-		"77.88.8.8", // Публичный DNS Google
-		"80.250.224.3",
-		"80.250.226.3",
-		"10.1.1.2", // Пример IP для шлюза
-	}
-	// Добавляем хопы из трассировки
-	hosts = append(hosts, hops...)
-
-	// Запрашиваем дополнительный хост для пинга
-	fmt.Print("\nВведите дополнительный хост для пинга (или нажмите Enter для пропуска): ")
-	var additionalHost string
-	fmt.Scanln(&additionalHost)
-	if additionalHost != "" {
-		hosts = append(hosts, additionalHost)
-	}
-
-	// Запрашиваем интервал тестирования
-	fmt.Print("\nВведите интервал тестирования в секундах (от 5 до 3600): ")
-	var interval int
-	fmt.Scanln(&interval)
-	if interval < 5 {
-		interval = 5
-	} else if interval > 3600 {
-		interval = 3600
-	}
-
-	// Запрашиваем параметры для MTR
-	fmt.Print("\nХотите запустить MTR? (y/n): ")
-	var runMTRChoice string
-	fmt.Scanln(&runMTRChoice)
-	if strings.ToLower(runMTRChoice) == "y" {
-		fmt.Print("Введите хост для MTR: ")
-		var mtrHost string
-		fmt.Scanln(&mtrHost)
-		if mtrHost != "" {
-			fmt.Print("Введите максимальное количество хопов (1-30): ")
-			var maxHops int
-			fmt.Scanln(&maxHops)
-			if maxHops < 1 {
-				maxHops = 1
-			} else if maxHops > 30 {
-				maxHops = 30
-			}
-			err := runMTR(mtrHost, maxHops)
-			if err != nil {
-				log.Printf("Ошибка при запуске MTR: %v", err)
-			}
-		}
-	}
-
-	// Запускаем сбор данных с указанным интервалом
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	done := make(chan bool)
-
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				startPingCollection(hosts)
-			}
-		}
-	}()
-
-	fmt.Printf("\nЗапущен сбор статистики с интервалом %d секунд.\n", interval)
-	fmt.Println("Нажмите Enter для завершения...")
-	fmt.Scanln()
-	done <- true
+	// Запускаем GUI с собранными хостами
+	createGUI(networkHosts)
 }
