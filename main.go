@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -11,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/transform"
 )
 
 // Функция для пинга адреса с использованием системной утилиты ping
@@ -28,6 +33,17 @@ func pingHost(host string, wg *sync.WaitGroup, results chan<- string) {
 	if err != nil {
 		results <- fmt.Sprintf("Ошибка при пинге %s: %v", host, err)
 		return
+	}
+
+	// Конвертируем вывод в UTF-8 для Windows
+	if runtime.GOOS == "windows" {
+		decoder := charmap.Windows1251.NewDecoder()
+		reader := transform.NewReader(bytes.NewReader(output), decoder)
+		output, err = io.ReadAll(reader)
+		if err != nil {
+			results <- fmt.Sprintf("Ошибка при конвертации кодировки для %s: %v", host, err)
+			return
+		}
 	}
 
 	// Парсим статистику
@@ -154,6 +170,13 @@ func startPingCollection(hosts []string) {
 }
 
 func main() {
+	// Инициализация кодировки для Windows
+	if runtime.GOOS == "windows" {
+		// Устанавливаем кодировку консоли в UTF-8
+		cmd := exec.Command("chcp", "65001")
+		cmd.Run()
+	}
+
 	// Создание папки для логов, если её нет
 	logDir := "stats_and_graphs"
 	err := os.MkdirAll(logDir, os.ModePerm)
