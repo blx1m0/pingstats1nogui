@@ -1,0 +1,21 @@
+# Бинарные файлы
+*.exe
+pingstats
+pingstats.exe
+
+# Директории с логами
+stats_and_graphs/
+
+# Временные файлы
+*.tmp
+*.log
+
+# IDE файлы
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Системные файлы
+.DS_Store
+Thumbs.db 

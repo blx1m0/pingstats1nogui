@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -121,28 +123,87 @@ func getFirstThreeHops(traceOutput string) []string {
 
 // Функция для получения IP-адреса устройства в Linux и Windows
 func getDeviceIP() (string, error) {
-	var cmd *exec.Cmd
-	var ip string
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", fmt.Errorf("Ошибка при получении сетевых интерфейсов: %v", err)
+	}
 
+	for _, iface := range ifaces {
+		// Пропускаем неактивные интерфейсы и loopback
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			// Преобразуем адрес в IP
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			// Пропускаем IPv6 и локальные адреса
+			if ip == nil || ip.IsLoopback() || ip.To4() == nil {
+				continue
+			}
+
+			return ip.String(), nil
+		}
+	}
+
+	return "", fmt.Errorf("Не удалось найти IP-адрес устройства")
+}
+
+// Функция для проверки доступности утилиты
+func checkCommandAvailable(cmd string) bool {
+	var checkCmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		// Для Windows используем ipconfig
-		cmd = exec.Command("ipconfig")
+		checkCmd = exec.Command("where", cmd)
 	} else {
-		// Для Linux используем ifconfig или ip a
-		cmd = exec.Command("bash", "-c", "ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}'")
+		checkCmd = exec.Command("which", cmd)
+	}
+	return checkCmd.Run() == nil
+}
+
+// Функция для запуска MTR до указанного хоста
+func runMTR(host string, maxHops int) error {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		if !checkCommandAvailable("tracert") {
+			return fmt.Errorf("утилита tracert не найдена в системе")
+		}
+		cmd = exec.Command("tracert", "-h", strconv.Itoa(maxHops), host)
+	} else {
+		if !checkCommandAvailable("mtr") {
+			return fmt.Errorf("утилита mtr не найдена в системе. Установите её с помощью: sudo apt-get install mtr")
+		}
+		cmd = exec.Command("mtr", "-n", "-c", "1", "-m", strconv.Itoa(maxHops), host)
 	}
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("Ошибка при получении IP-адреса устройства: %v", err)
+		return fmt.Errorf("Ошибка при запуске MTR: %v", err)
 	}
 
-	ip = strings.TrimSpace(string(output))
-	if ip == "" {
-		return "", fmt.Errorf("Не удалось найти IP-адрес устройства")
+	// Конвертируем вывод в UTF-8 для Windows
+	if runtime.GOOS == "windows" {
+		decoder := charmap.Windows1251.NewDecoder()
+		reader := transform.NewReader(bytes.NewReader(output), decoder)
+		output, err = io.ReadAll(reader)
+		if err != nil {
+			return fmt.Errorf("Ошибка при конвертации кодировки: %v", err)
+		}
 	}
 
-	return ip, nil
+	log.Printf("Результаты MTR до %s:\n%s", host, string(output))
+	return nil
 }
 
 func startPingCollection(hosts []string) {
@@ -177,22 +238,31 @@ func main() {
 		cmd.Run()
 	}
 
-	// Создание папки для логов, если её нет
+	// Проверяем доступность необходимых утилит
+	if !checkCommandAvailable("ping") {
+		log.Fatal("Утилита ping не найдена в системе")
+	}
+
+	// Создание папки для логов с учетом ОС
 	logDir := "stats_and_graphs"
+	if runtime.GOOS == "windows" {
+		logDir = filepath.Join(".", logDir)
+	}
 	err := os.MkdirAll(logDir, os.ModePerm)
 	if err != nil {
 		log.Fatalf("Ошибка при создании папки для логов: %v", err)
 	}
 
-	// Открываем лог-файл для записи (очищаем перед каждым запуском)
-	logFile, err := os.OpenFile(logDir+"/ping_statistics.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
+	// Открываем лог-файл с учетом ОС
+	logPath := filepath.Join(logDir, "ping_statistics.log")
+	logFile, err := os.OpenFile(logPath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Fatalf("Ошибка при открытии лог-файла: %v", err)
 	}
 	defer logFile.Close()
 
-	// Настроим логирование в файл
-	log.SetOutput(logFile)
+	// Настроим логирование в файл и в консоль
+	log.SetOutput(io.MultiWriter(logFile, os.Stdout))
 	log.Println("Программа для сбора статистики пинга!")
 	log.Println("Лог сохранён в stats_and_graphs/ping_statistics.log")
 	log.Println("Made by Lg$")
@@ -229,9 +299,65 @@ func main() {
 	// Добавляем хопы из трассировки
 	hosts = append(hosts, hops...)
 
-	// Запускаем сбор данных в отдельной горутине
-	go startPingCollection(hosts)
+	// Запрашиваем дополнительный хост для пинга
+	fmt.Print("\nВведите дополнительный хост для пинга (или нажмите Enter для пропуска): ")
+	var additionalHost string
+	fmt.Scanln(&additionalHost)
+	if additionalHost != "" {
+		hosts = append(hosts, additionalHost)
+	}
 
-	// Запускаем GUI в основной горутине
-	createGUI()
+	// Запрашиваем интервал тестирования
+	fmt.Print("\nВведите интервал тестирования в секундах (от 5 до 3600): ")
+	var interval int
+	fmt.Scanln(&interval)
+	if interval < 5 {
+		interval = 5
+	} else if interval > 3600 {
+		interval = 3600
+	}
+
+	// Запрашиваем параметры для MTR
+	fmt.Print("\nХотите запустить MTR? (y/n): ")
+	var runMTRChoice string
+	fmt.Scanln(&runMTRChoice)
+	if strings.ToLower(runMTRChoice) == "y" {
+		fmt.Print("Введите хост для MTR: ")
+		var mtrHost string
+		fmt.Scanln(&mtrHost)
+		if mtrHost != "" {
+			fmt.Print("Введите максимальное количество хопов (1-30): ")
+			var maxHops int
+			fmt.Scanln(&maxHops)
+			if maxHops < 1 {
+				maxHops = 1
+			} else if maxHops > 30 {
+				maxHops = 30
+			}
+			err := runMTR(mtrHost, maxHops)
+			if err != nil {
+				log.Printf("Ошибка при запуске MTR: %v", err)
+			}
+		}
+	}
+
+	// Запускаем сбор данных с указанным интервалом
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	done := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				startPingCollection(hosts)
+			}
+		}
+	}()
+
+	fmt.Printf("\nЗапущен сбор статистики с интервалом %d секунд.\n", interval)
+	fmt.Println("Нажмите Enter для завершения...")
+	fmt.Scanln()
+	done <- true
 }
