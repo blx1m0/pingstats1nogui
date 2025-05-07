@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -24,6 +25,7 @@ type PingStats struct {
 
 var (
 	statsMap   = make(map[string]*PingStats)
+	statsMutex sync.RWMutex
 	mainWindow fyne.Window
 )
 

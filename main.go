@@ -83,6 +83,8 @@ func parsePingStats(output, host string) *PingStats {
 
 // Функция для обновления карты статистики
 func updateStatsMap(host string, stats *PingStats) {
+	statsMutex.Lock()
+	defer statsMutex.Unlock()
 	statsMap[host] = stats
 }
 
@@ -184,7 +186,7 @@ func runMTR(host string, maxHops int) error {
 		if !checkCommandAvailable("mtr") {
 			return fmt.Errorf("утилита mtr не найдена в системе. Установите её с помощью: sudo apt-get install mtr")
 		}
-		cmd = exec.Command("mtr", "-n", "-c", "1", "-m", strconv.Itoa(maxHops), host)
+		cmd = exec.Command("mtr", "-n", "-r", "-c", "1", "-m", strconv.Itoa(maxHops), host)
 	}
 
 	output, err := cmd.CombinedOutput()
