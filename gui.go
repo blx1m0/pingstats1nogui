@@ -434,8 +434,8 @@ func createGUI(initialHosts []string) {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
 			fyne.CurrentApp().SendNotification(&fyne.Notification{Title: "", Content: ""}) // триггерим event loop
-			mainWindow.Resize(mainWindow.Size().Add(fyne.NewSize(1, 1)))
-			mainWindow.Resize(mainWindow.Size().Subtract(fyne.NewSize(1, 1)))
+			mainWindow.Resize(mainWindow.Canvas().Size().Add(fyne.NewSize(1, 1)))
+			mainWindow.Resize(mainWindow.Canvas().Size().Subtract(fyne.NewSize(1, 1)))
 			mainWindow.RequestFocus()
 			mainWindow.Canvas().Refresh(mainWindow.Content())
 		}()
