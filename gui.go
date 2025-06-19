@@ -428,8 +428,19 @@ func createGUI(initialHosts []string) {
 	)
 
 	mainWindow.SetContent(content)
+
+	// Исправление бага с курсором на Windows: программно меняем размер окна после показа
+	if runtime.GOOS == "windows" {
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			fyne.CurrentApp().SendNotification(&fyne.Notification{Title: "", Content: ""}) // триггерим event loop
+			mainWindow.Resize(mainWindow.Size().Add(fyne.NewSize(1, 1)))
+			mainWindow.Resize(mainWindow.Size().Subtract(fyne.NewSize(1, 1)))
+			mainWindow.RequestFocus()
+			mainWindow.Canvas().Refresh(mainWindow.Content())
+		}()
+	}
 	mainWindow.ShowAndRun()
-	mainWindow.Canvas().Refresh(mainWindow.Content())
 }
 
 // Кастомная тема
