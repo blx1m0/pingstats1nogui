@@ -92,30 +92,33 @@ func runMTRAndUpdateWindow(host string) {
 	mtrStopChan = make(chan bool)
 
 	go func() {
-		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
-			if !checkCommandAvailable("tracert") {
-				fyne.Do(func() {
-					if mtrTextWidget != nil {
-						mtrTextWidget.SetText("Ошибка: tracert не найден в системе.\n")
+			// Используем winMTR вместо tracert
+			maxHops := 30
+			timeout := 2 * time.Second
+			hops, err := winMTR(host, maxHops, timeout)
+			fyne.Do(func() {
+				if mtrTextWidget != nil {
+					if err != nil {
+						mtrTextWidget.SetText(fmt.Sprintf("Ошибка winMTR: %v\n", err))
+					} else {
+						mtrTextWidget.SetText(FormatWinMTRResult(hops))
 					}
-					mtrRunning = false
-				})
-				return
-			}
-			cmd = exec.Command("tracert", host)
-		} else {
-			if !checkCommandAvailable("mtr") {
-				fyne.Do(func() {
-					if mtrTextWidget != nil {
-						mtrTextWidget.SetText("Ошибка: mtr не найден в системе.\n")
-					}
-					mtrRunning = false
-				})
-				return
-			}
-			cmd = exec.Command("mtr", "-n", "-r", "-c", "1", host)
+				}
+				mtrRunning = false
+			})
+			return
 		}
+		if !checkCommandAvailable("mtr") {
+			fyne.Do(func() {
+				if mtrTextWidget != nil {
+					mtrTextWidget.SetText("Ошибка: mtr не найден в системе.\n")
+				}
+				mtrRunning = false
+			})
+			return
+		}
+		cmd := exec.Command("mtr", "-n", "-r", "-c", "1", host)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			fyne.Do(func() {
