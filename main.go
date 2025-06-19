@@ -150,16 +150,34 @@ func getFirstThreeHops(host string) ([]string, error) {
 
 	lines := strings.Split(string(output), "\n")
 	hops := []string{}
-	// Регулярное выражение для извлечения IP-адресов из скобок
-	re := regexp.MustCompile(`\((\d+\.\d+\.\d+\.\d+)\)`)
-
-	for i, line := range lines {
-		if i >= 3 { // Нам нужны только первые 3 хопа
-			break
+	if runtime.GOOS == "windows" {
+		// Для Windows ищем IP-адреса без скобок
+		ipRe := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)`)
+		for _, line := range lines {
+			if len(hops) >= 3 {
+				break
+			}
+			matches := ipRe.FindAllString(line, -1)
+			for _, ip := range matches {
+				if ip != "0.0.0.0" && ip != "127.0.0.1" && !strings.HasPrefix(ip, "192.168.") {
+					hops = append(hops, ip)
+					if len(hops) >= 3 {
+						break
+					}
+				}
+			}
 		}
-		matches := re.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			hops = append(hops, matches[1]) // Добавляем IP хопа
+	} else {
+		// Для Linux ищем IP-адреса в скобках
+		re := regexp.MustCompile(`\((\d+\.\d+\.\d+\.\d+)\)`)
+		for i, line := range lines {
+			if i >= 3 {
+				break
+			}
+			matches := re.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				hops = append(hops, matches[1])
+			}
 		}
 	}
 

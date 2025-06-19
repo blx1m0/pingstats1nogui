@@ -200,7 +200,7 @@ func showMTRStats() {
 }
 
 func createGUI(initialHosts []string) {
-	myApp := app.New()
+	myApp := app.NewWithID("pingstats1nogui")
 	mainWindow = myApp.NewWindow("Ping Statistics")
 	mainWindow.Resize(fyne.NewSize(1200, 800))
 
