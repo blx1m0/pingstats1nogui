@@ -5,7 +5,7 @@
 ## Возможности
 
 - Пинг нескольких хостов одновременно
-- Трассировка маршрута (MTR/traceroute)
+- Трассировка маршрута (MTR/traceroute, на Windows используется tracert)
 - Настраиваемый интервал тестирования
 - Логирование результатов
 - Поддержка Windows и Linux
@@ -14,11 +14,11 @@
 
 ### Windows
 - Go 1.16 или выше
-- Встроенные утилиты: ping, tracert
+- Встроенные утилиты: ping, tracert (для трассировки)
 
 ### Linux
 - Go 1.16 или выше
-- Утилита mtr: `sudo apt-get install mtr` (для Ubuntu/Debian)
+- Утилита mtr: `sudo apt-get install mtr` (для Ubuntu/Debian, только для Linux)
 - Встроенные утилиты: ping, traceroute
 
 ## Установка

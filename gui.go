@@ -92,19 +92,40 @@ func runMTRAndUpdateWindow(host string) {
 	mtrStopChan = make(chan bool)
 
 	go func() {
-		cmd := exec.Command("mtr", "-n", "-r", "-c", "1", host)
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			if !checkCommandAvailable("tracert") {
+				fyne.Do(func() {
+					if mtrTextWidget != nil {
+						mtrTextWidget.SetText("Ошибка: tracert не найден в системе.\n")
+					}
+					mtrRunning = false
+				})
+				return
+			}
+			cmd = exec.Command("tracert", host)
+		} else {
+			if !checkCommandAvailable("mtr") {
+				fyne.Do(func() {
+					if mtrTextWidget != nil {
+						mtrTextWidget.SetText("Ошибка: mtr не найден в системе.\n")
+					}
+					mtrRunning = false
+				})
+				return
+			}
+			cmd = exec.Command("mtr", "-n", "-r", "-c", "1", host)
+		}
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			fyne.Do(func() {
 				if mtrTextWidget != nil {
-					mtrTextWidget.SetText(fmt.Sprintf("Ошибка MTR: %v\n", err))
+					mtrTextWidget.SetText(fmt.Sprintf("Ошибка трассировки: %v\n", err))
 				}
 				mtrRunning = false
 			})
 			return
 		}
-
-		// Записываем результат в лог
 		if err := ensureLogDir(); err != nil {
 			log.Printf("Ошибка при создании каталога для логов: %v", err)
 		} else {
@@ -112,7 +133,6 @@ func runMTRAndUpdateWindow(host string) {
 				log.Printf("Ошибка при обновлении файла логов MTR: %v", err)
 			}
 		}
-
 		fyne.Do(func() {
 			if mtrTextWidget != nil {
 				mtrTextWidget.SetText(string(output))
@@ -123,28 +143,22 @@ func runMTRAndUpdateWindow(host string) {
 }
 
 func showMTRStats() {
-	// Если окно уже открыто, показываем его
 	if mtrWindow != nil {
 		mtrWindow.Show()
+		mtrWindow.Canvas().Refresh(mtrWindow.Content())
 		return
 	}
-
 	mtrWindow = fyne.CurrentApp().NewWindow("Статистика MTR")
 	mtrWindow.Resize(fyne.NewSize(800, 600))
-
-	// Создаем текстовое поле для отображения статистики с моноширинным шрифтом
 	mtrTextWidget = widget.NewTextGrid()
 	scrollContainer := container.NewScroll(mtrTextWidget)
-
-	// Создаем поле ввода для хоста
 	hostEntry := widget.NewEntry()
-	hostEntry.SetPlaceHolder("Введите хост для MTR")
+	hostEntry.SetPlaceHolder("Введите хост для трассировки")
 	if mtrEntry != nil {
 		hostEntry.SetText(mtrEntry.Text)
 	}
-
 	var stopButton *widget.Button
-	stopButton = widget.NewButton("Остановить MTR", func() {
+	stopButton = widget.NewButton("Остановить трассировку", func() {
 		if mtrRunning {
 			mtrStopChan <- true
 			mtrRunning = false
@@ -154,9 +168,7 @@ func showMTRStats() {
 		}
 	})
 	stopButton.Disable()
-
-	// Создаем кнопку запуска
-	startButton := widget.NewButton("Запустить MTR", func() {
+	startButton := widget.NewButton("Запустить трассировку", func() {
 		host := hostEntry.Text
 		if host == "" {
 			return
@@ -167,24 +179,21 @@ func showMTRStats() {
 		runMTRAndUpdateWindow(host)
 		stopButton.Enable()
 	})
-
-	// Создаем контейнер с элементами управления
 	controls := container.NewVBox(
 		hostEntry,
 		container.NewHBox(startButton, stopButton),
 	)
-
-	// Создаем основной контейнер
 	content := container.NewBorder(controls, nil, nil, nil, scrollContainer)
 	mtrWindow.SetContent(content)
-
-	// Обработка закрытия окна
 	mtrWindow.SetOnClosed(func() {
 		mtrWindow = nil
 		mtrTextWidget = nil
 	})
-
+	if runtime.GOOS == "windows" {
+		mtrTextWidget.SetText("Внимание: на Windows используется tracert, а не mtr!\n")
+	}
 	mtrWindow.Show()
+	mtrWindow.Canvas().Refresh(mtrWindow.Content())
 }
 
 func createGUI(initialHosts []string) {
@@ -420,6 +429,7 @@ func createGUI(initialHosts []string) {
 
 	mainWindow.SetContent(content)
 	mainWindow.ShowAndRun()
+	mainWindow.Canvas().Refresh(mainWindow.Content())
 }
 
 // Кастомная тема
